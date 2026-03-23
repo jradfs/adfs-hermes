@@ -849,6 +849,24 @@ def _hex_to_truecolor_ansi(hex_color: str, *, bold: bool = False) -> str:
         return _BOLD if bold else ""
 
 
+def _relative_time(ts) -> str:
+    """Format a timestamp as relative time for in-chat session lists."""
+    if not ts:
+        return "?"
+    delta = time.time() - ts
+    if delta < 60:
+        return "just now"
+    if delta < 3600:
+        return f"{int(delta / 60)}m ago"
+    if delta < 86400:
+        return f"{int(delta / 3600)}h ago"
+    if delta < 172800:
+        return "yesterday"
+    if delta < 604800:
+        return f"{int(delta / 86400)}d ago"
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+
+
 def _stream_palette() -> dict[str, str]:
     """Return ANSI colors for streamed light-weight markdown formatting."""
     try:
@@ -2561,6 +2579,99 @@ class HermesCLI:
         )
         self.console.print(panel)
 
+    def _list_resume_candidates(self, limit: int = 12) -> None:
+        """Print recent CLI sessions that can be resumed from the chat."""
+        if not self._session_db:
+            self.console.print("[bold red]Session database not available.[/]")
+            return
+
+        try:
+            sessions = self._session_db.list_sessions_rich(source="cli", limit=limit)
+        except Exception as e:
+            self.console.print(f"[bold red]Could not load sessions: {e}[/]")
+            return
+
+        sessions = [s for s in sessions if s.get("id") != self.session_id]
+        if not sessions:
+            self.console.print("[dim]No past CLI sessions found.[/]")
+            return
+
+        lines = ["[bold]Recent CLI Sessions[/bold]"]
+        for idx, s in enumerate(sessions[:limit], 1):
+            sid = s.get("id", "")
+            title = (s.get("title") or "Untitled").strip()
+            preview = (s.get("preview") or "").strip()
+            last_active = s.get("last_active")
+            try:
+                last_label = _relative_time(last_active)
+            except Exception:
+                last_label = "unknown"
+            preview_part = f" — {preview}" if preview else ""
+            lines.append(
+                f"{idx}. [bold]{title}[/bold] [{sid}] ({last_label}){preview_part}"
+            )
+        lines.append("")
+        lines.append(
+            f"[dim]Use /resume <session_id_or_title> to switch. "
+            f"For exact terminal resume, `{os.path.basename(sys.argv[0])} --continue` still works.[/]"
+        )
+        self.console.print("\n".join(lines))
+
+    def _resume_session_in_chat(self, target: str) -> bool:
+        """Switch the active CLI chat to a previous session by ID or title."""
+        if not self._session_db:
+            self.console.print("[bold red]Session database not available.[/]")
+            return False
+
+        query = (target or "").strip()
+        if not query:
+            self._list_resume_candidates()
+            return True
+
+        resolved_id = self._session_db.resolve_session_id(query)
+        if not resolved_id:
+            resolved_id = self._session_db.resolve_session_by_title(query)
+        if not resolved_id:
+            self.console.print(
+                f"[bold red]No session found matching:[/] [bold]{_escape(query)}[/]"
+            )
+            self.console.print(
+                f"[dim]Try /resume with no arguments to list recent sessions, "
+                f"or `{os.path.basename(sys.argv[0])} sessions list` for the full list.[/]"
+            )
+            return True
+
+        if resolved_id == self.session_id:
+            self.console.print(
+                f"[dim]Already on session[/] [bold]{_escape(resolved_id)}[/bold]"
+            )
+            return True
+
+        if self.agent and self.conversation_history:
+            try:
+                self.agent.flush_memories(self.conversation_history)
+            except Exception:
+                pass
+
+        current_session_id = self.session_id
+        if self._session_db and current_session_id:
+            try:
+                self._session_db.end_session(current_session_id, "resume_switch")
+            except Exception:
+                pass
+
+        self.agent = None
+        self._active_agent_route_signature = None
+        self.session_id = resolved_id
+        self._resumed = True
+        self.conversation_history = []
+        self.session_start = datetime.now()
+
+        if not self._preload_resumed_session():
+            return True
+        self._display_resumed_history()
+        return True
+
     def _try_attach_clipboard_image(self) -> bool:
         """Check clipboard for an image and attach it if found.
 
@@ -4161,9 +4272,8 @@ class HermesCLI:
                 else:
                     self.console.print(f"[bold red]Failed to load skill for {base_cmd}[/]")
             elif base_cmd == "/resume":
-                _cprint(f"{_GOLD}/resume isn't a chat command in the CLI.{_RST}")
-                _cprint(f"{_DIM}Use `{os.path.basename(sys.argv[0])} --continue` to reopen the latest session,{_RST}")
-                _cprint(f"{_DIM}or `{os.path.basename(sys.argv[0])} sessions list` then `{os.path.basename(sys.argv[0])} --resume <session_id>`. {_RST}")
+                user_args = cmd_original[len(base_cmd):].strip()
+                return self._resume_session_in_chat(user_args)
             else:
                 # Prefix matching: if input uniquely identifies one command, execute it.
                 # Matches against both built-in COMMANDS and installed skill commands so
