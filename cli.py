@@ -1200,6 +1200,8 @@ class HermesCLI:
         self._stream_buf = ""        # Partial line buffer for line-buffered rendering
         self._stream_started = False  # True once first delta arrives
         self._stream_box_opened = False  # True once the response box header is printed
+        self._stream_table_lines: list[str] = []
+        self._stream_rendered_inline_table = False
         
         # Configuration - priority: CLI args > env vars > config file
         # Model comes from: CLI arg or config.yaml (single source of truth).
@@ -1778,40 +1780,114 @@ class HermesCLI:
         self._close_reasoning_box()
 
         # Open the response box header on the very first visible text
-        if not self._stream_box_opened:
-            # Strip leading whitespace/newlines before first visible content
-            text = text.lstrip("\n")
-            if not text:
-                return
-            self._stream_box_opened = True
-            try:
-                from hermes_cli.skin_engine import get_active_skin
-                _skin = get_active_skin()
-                label = _skin.get_branding("response_label", "⚕ Hermes")
-                _text_hex = _skin.get_color("banner_text", "#FFF8DC")
-            except Exception:
-                label = "⚕ Hermes"
-                _text_hex = "#FFF8DC"
-            # Build a true-color ANSI escape for the response text color
-            # so streamed content matches the Rich Panel appearance.
-            try:
-                _r = int(_text_hex[1:3], 16)
-                _g = int(_text_hex[3:5], 16)
-                _b = int(_text_hex[5:7], 16)
-                self._stream_text_ansi = f"\033[38;2;{_r};{_g};{_b}m"
-            except (ValueError, IndexError):
-                self._stream_text_ansi = ""
-            w = shutil.get_terminal_size().columns
-            fill = w - 2 - len(label)
-            _cprint(f"\n{_GOLD}╭─{label}{'─' * max(fill - 1, 0)}╮{_RST}")
+        text = text.lstrip("\n")
+        if not text:
+            return
+        self._ensure_stream_box_open()
 
         self._stream_buf += text
 
         # Emit complete lines, keep partial remainder in buffer
-        _tc = getattr(self, "_stream_text_ansi", "")
         while "\n" in self._stream_buf:
             line, self._stream_buf = self._stream_buf.split("\n", 1)
-            _cprint(f"{_tc}{line}{_RST}" if _tc else line)
+            self._emit_stream_line(line)
+
+    def _ensure_stream_box_open(self) -> None:
+        """Open the streaming response box if it is not already visible."""
+        if self._stream_box_opened:
+            return
+        self._stream_box_opened = True
+        try:
+            from hermes_cli.skin_engine import get_active_skin
+            _skin = get_active_skin()
+            label = _skin.get_branding("response_label", "⚕ Hermes")
+            _text_hex = _skin.get_color("banner_text", "#FFF8DC")
+        except Exception:
+            label = "⚕ Hermes"
+            _text_hex = "#FFF8DC"
+        try:
+            _r = int(_text_hex[1:3], 16)
+            _g = int(_text_hex[3:5], 16)
+            _b = int(_text_hex[5:7], 16)
+            self._stream_text_ansi = f"\033[38;2;{_r};{_g};{_b}m"
+        except (ValueError, IndexError):
+            self._stream_text_ansi = ""
+        w = shutil.get_terminal_size().columns
+        fill = w - 2 - len(label)
+        _cprint(f"\n{_GOLD}╭─{label}{'─' * max(fill - 1, 0)}╮{_RST}")
+
+    def _emit_plain_stream_line(self, line: str) -> None:
+        """Emit a single non-table line inside the active response box."""
+        self._ensure_stream_box_open()
+        _tc = getattr(self, "_stream_text_ansi", "")
+        _cprint(f"{_tc}{line}{_RST}" if _tc else line)
+
+    def _render_inline_stream_table(self, lines: list[str]) -> bool:
+        """Render a completed markdown table block inline during streaming."""
+        if len(lines) < 2 or not _MD_TABLE_SEPARATOR_RE.match(lines[1].strip()):
+            return False
+
+        header_line = lines[0]
+        row_lines = lines[2:]
+        table_view = _build_markdown_table_renderable(header_line, row_lines)
+        if table_view is None:
+            return False
+
+        # Close the current text box before inserting the table panel inline.
+        if self._stream_box_opened:
+            w = shutil.get_terminal_size().columns
+            _cprint(f"{_GOLD}╰{'─' * (w - 2)}╯{_RST}")
+            self._stream_box_opened = False
+
+        try:
+            from hermes_cli.skin_engine import get_active_skin
+            _skin = get_active_skin()
+            label = _skin.get_branding("response_label", "⚕ Hermes")
+            _resp_color = _skin.get_color("response_border", "#CD7F32")
+            _resp_text = _skin.get_color("banner_text", "#FFF8DC")
+        except Exception:
+            label = "⚕ Hermes"
+            _resp_color = "#CD7F32"
+            _resp_text = "#FFF8DC"
+
+        ChatConsole().print(Panel(
+            table_view,
+            title=f"[{_resp_color} bold]{label} Table[/]",
+            title_align="left",
+            border_style=_resp_color,
+            style=_resp_text,
+            box=rich_box.HORIZONTALS,
+            padding=(0, 1),
+        ))
+        self._stream_rendered_inline_table = True
+        return True
+
+    def _flush_stream_table_lines(self) -> None:
+        """Flush any buffered table candidate lines."""
+        lines = getattr(self, "_stream_table_lines", [])
+        if not lines:
+            return
+        self._stream_table_lines = []
+
+        if self._render_inline_stream_table(lines):
+            return
+
+        for line in lines:
+            self._emit_plain_stream_line(line)
+
+    def _emit_stream_line(self, line: str) -> None:
+        """Emit one complete streamed line, buffering markdown tables inline."""
+        if self._stream_table_lines:
+            if _is_markdown_table_row(line) or _MD_TABLE_SEPARATOR_RE.match(line.strip()):
+                self._stream_table_lines.append(line)
+                return
+            self._flush_stream_table_lines()
+
+        if _is_markdown_table_row(line):
+            self._stream_table_lines = [line]
+            return
+
+        self._emit_plain_stream_line(line)
 
     def _flush_stream(self) -> None:
         """Emit any remaining partial line from the stream buffer and close the box."""
@@ -1819,9 +1895,10 @@ class HermesCLI:
         self._close_reasoning_box()
 
         if self._stream_buf:
-            _tc = getattr(self, "_stream_text_ansi", "")
-            _cprint(f"{_tc}{self._stream_buf}{_RST}" if _tc else self._stream_buf)
+            self._emit_stream_line(self._stream_buf)
             self._stream_buf = ""
+
+        self._flush_stream_table_lines()
 
         # Close the response box
         if self._stream_box_opened:
@@ -1838,6 +1915,8 @@ class HermesCLI:
         self._in_reasoning_block = False
         self._reasoning_box_opened = False
         self._reasoning_buf = ""
+        self._stream_table_lines = []
+        self._stream_rendered_inline_table = False
 
     def _slow_command_status(self, command: str) -> str:
         """Return a user-facing status message for slower slash commands."""
@@ -5807,7 +5886,9 @@ class HermesCLI:
                     _resp_text = "#FFF8DC"
 
                 is_error_response = result and (result.get("failed") or result.get("partial"))
-                already_streamed = self._stream_started and self._stream_box_opened and not is_error_response
+                already_streamed = self._stream_started and (
+                    self._stream_box_opened or getattr(self, "_stream_rendered_inline_table", False)
+                ) and not is_error_response
                 if use_streaming_tts and _streaming_box_opened and not is_error_response:
                     # Text was already printed sentence-by-sentence; just close the box
                     w = shutil.get_terminal_size().columns
@@ -5816,7 +5897,7 @@ class HermesCLI:
                     # Response was already streamed token-by-token with box framing.
                     # When the content contains markdown tables, print a compact
                     # rich-rendered table view below the stream so tables are readable.
-                    if _response_contains_markdown_table(response):
+                    if _response_contains_markdown_table(response) and not getattr(self, "_stream_rendered_inline_table", False):
                         table_view = _table_only_renderable(response)
                         if table_view is not None:
                             _chat_console = ChatConsole()
