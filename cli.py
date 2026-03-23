@@ -834,6 +834,45 @@ def _skin_table_style() -> tuple[str, str, str]:
         return "#8B5A14", "#17212F", "#0F766E"
 
 
+def _hex_to_truecolor_ansi(hex_color: str, *, bold: bool = False) -> str:
+    """Convert a hex color like #RRGGBB into an ANSI truecolor escape."""
+    try:
+        value = (hex_color or "").strip().lstrip("#")
+        if len(value) != 6:
+            raise ValueError("expected 6 hex chars")
+        r = int(value[0:2], 16)
+        g = int(value[2:4], 16)
+        b = int(value[4:6], 16)
+        prefix = "1;" if bold else ""
+        return f"\033[{prefix}38;2;{r};{g};{b}m"
+    except Exception:
+        return _BOLD if bold else ""
+
+
+def _stream_palette() -> dict[str, str]:
+    """Return ANSI colors for streamed light-weight markdown formatting."""
+    try:
+        from hermes_cli.skin_engine import get_active_skin
+        skin = get_active_skin()
+        return {
+            "accent": _hex_to_truecolor_ansi(skin.get_color("response_border", "#8B5A14"), bold=True),
+            "label": _hex_to_truecolor_ansi(skin.get_color("ui_label", "#0F766E"), bold=True),
+            "ok": _hex_to_truecolor_ansi(skin.get_color("ui_ok", "#166534"), bold=True),
+            "error": _hex_to_truecolor_ansi(skin.get_color("ui_error", "#B91C1C"), bold=True),
+            "warn": _hex_to_truecolor_ansi(skin.get_color("ui_warn", "#A15C07"), bold=True),
+            "text": _hex_to_truecolor_ansi(skin.get_color("banner_text", "#17212F")),
+        }
+    except Exception:
+        return {
+            "accent": _BOLD,
+            "label": _BOLD,
+            "ok": _BOLD,
+            "error": _BOLD,
+            "warn": _BOLD,
+            "text": "",
+        }
+
+
 def _column_justify(header: str) -> str:
     normalized = (header or "").strip().lower()
     if normalized in {"balance", "amount", "value", "total", "debit", "credit", "price"}:
@@ -924,6 +963,8 @@ def _apply_stream_markdown(line: str, base_ansi: str = "") -> str:
     if not line:
         return line
 
+    palette = _stream_palette()
+
     def _restore_base() -> str:
         return f"{_RST}{base_ansi}" if base_ansi else _RST
 
@@ -931,21 +972,47 @@ def _apply_stream_markdown(line: str, base_ansi: str = "") -> str:
         inner = match.group(1)
         if not inner.strip():
             return match.group(0)
-        return f"{_BOLD}{inner}{_restore_base()}"
+        return f"{palette['accent']}{inner}{_restore_base()}"
+
+    def _money_sub(match: re.Match) -> str:
+        amount = match.group(0)
+        if amount.startswith("-"):
+            style = palette["error"]
+        else:
+            style = palette["ok"]
+        return f"{style}{amount}{_restore_base()}"
 
     # Inline bold: **text**
     styled = re.sub(r"\*\*([^*\n][^*\n]*?)\*\*", _bold_sub, line)
+    styled = re.sub(r"-?\$[\d,]+(?:\.\d{2})?", _money_sub, styled)
 
     # Make top-level bullets a touch clearer in the stream.
     if styled.startswith("- "):
-        styled = f"{_BOLD}•{_restore_base()} {styled[2:]}"
+        styled = f"{palette['accent']}•{_restore_base()} {styled[2:]}"
+        styled = re.sub(
+            r"^((?:\033\[[0-9;]*m)*)•((?:\033\[[0-9;]*m)*)\s+([^:]+:)",
+            lambda m: f"{m.group(1)}•{m.group(2)} {palette['label']}{m.group(3)}{_restore_base()}",
+            styled,
+            count=1,
+        )
+
+    if re.match(r"^\d+\.\s", styled):
+        styled = re.sub(
+            r"^(\d+\.)\s+([^:]+:?)",
+            lambda m: f"{palette['accent']}{m.group(1)}{_restore_base()} {palette['label']}{m.group(2)}{_restore_base()}",
+            styled,
+            count=1,
+        )
 
     # Mild section emphasis for lines that are effectively standalone headings.
     plain = _strip_ansi_text(line).strip()
     if plain.startswith("**") and plain.endswith("**") and plain.count("**") == 2:
         heading = plain[2:-2].strip()
         if heading:
-            styled = f"{_BOLD}{heading}{_restore_base()}"
+            styled = f"{palette['label']}{heading}{_restore_base()}"
+
+    elif plain.endswith(":") and len(plain) <= 72 and not plain.startswith("http"):
+        styled = f"{palette['label']}{plain}{_restore_base()}"
 
     return styled
 
