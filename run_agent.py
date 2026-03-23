@@ -659,7 +659,9 @@ class AIAgent:
                 # INFO/WARNING messages just clutter it.
                 for quiet_logger in [
                     'tools',               # all tools.* (terminal, browser, web, file, etc.)
+                    'tools.environments',  # docker/sandbox runtime logging
                     'minisweagent',         # mini-swe-agent execution backend
+                    'minisweagent.environment',
                     'run_agent',            # agent runner internals
                     'trajectory_compressor',
                     'cron',                 # scheduler (only relevant in daemon mode)

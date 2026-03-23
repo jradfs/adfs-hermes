@@ -23,6 +23,7 @@ import tempfile
 import time
 import uuid
 import textwrap
+import re
 from contextlib import contextmanager
 from pathlib import Path
 from datetime import datetime
@@ -445,9 +446,11 @@ except Exception:
     pass  # Skin engine is optional — default skin used if unavailable
 
 from rich import box as rich_box
-from rich.console import Console
+from rich.console import Console, Group
+from rich.markdown import Markdown
 from rich.markup import escape as _escape
 from rich.panel import Panel
+from rich.table import Table as _RichTable
 from rich.text import Text as _RichText
 
 import fire
@@ -788,6 +791,150 @@ def _rich_text_from_ansi(text: str) -> _RichText:
     ``[not markup]`` while still interpreting real ANSI color codes.
     """
     return _RichText.from_ansi(text or "")
+
+
+_MD_TABLE_SEPARATOR_RE = re.compile(
+    r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+(?:\s*:?-{3,}:?\s*)\|?\s*$"
+)
+
+
+def _strip_ansi_text(text: str) -> str:
+    """Remove ANSI control sequences from text before Rich rendering."""
+    try:
+        from tools.ansi_strip import strip_ansi
+        return strip_ansi(text or "")
+    except Exception:
+        return text or ""
+
+
+def _is_markdown_table_row(line: str) -> bool:
+    stripped = line.strip()
+    return "|" in stripped and not stripped.startswith("```")
+
+
+def _split_markdown_table_row(line: str) -> list[str]:
+    stripped = line.strip()
+    if stripped.startswith("|"):
+        stripped = stripped[1:]
+    if stripped.endswith("|"):
+        stripped = stripped[:-1]
+    return [cell.strip() for cell in stripped.split("|")]
+
+
+def _skin_table_style() -> tuple[str, str, str]:
+    try:
+        from hermes_cli.skin_engine import get_active_skin
+        skin = get_active_skin()
+        return (
+            skin.get_color("response_border", "#8B5A14"),
+            skin.get_color("banner_text", "#17212F"),
+            skin.get_color("ui_label", "#0F766E"),
+        )
+    except Exception:
+        return "#8B5A14", "#17212F", "#0F766E"
+
+
+def _build_markdown_table_renderable(header_line: str, row_lines: list[str]) -> _RichTable | None:
+    headers = _split_markdown_table_row(header_line)
+    if not headers:
+        return None
+
+    border_color, text_color, label_color = _skin_table_style()
+    table = _RichTable(
+        show_header=True,
+        header_style=f"bold {label_color}",
+        box=rich_box.SIMPLE_HEAVY,
+        border_style=border_color,
+        expand=True,
+        pad_edge=False,
+        show_lines=False,
+    )
+    for header in headers:
+        table.add_column(header or " ", style=text_color, overflow="fold")
+
+    for raw_row in row_lines:
+        cells = _split_markdown_table_row(raw_row)
+        if not cells:
+            continue
+        if len(cells) < len(headers):
+            cells.extend([""] * (len(headers) - len(cells)))
+        elif len(cells) > len(headers):
+            cells = cells[:len(headers)]
+        table.add_row(*cells)
+
+    return table
+
+
+def _response_contains_markdown_table(text: str) -> bool:
+    lines = _strip_ansi_text(text).splitlines()
+    for idx in range(len(lines) - 1):
+        if _is_markdown_table_row(lines[idx]) and _MD_TABLE_SEPARATOR_RE.match(lines[idx + 1] or ""):
+            return True
+    return False
+
+
+def _response_renderable(text: str):
+    """Render assistant output with markdown and rich tables when possible."""
+    cleaned = _strip_ansi_text(text).replace("\r\n", "\n").replace("\r", "\n")
+    lines = cleaned.splitlines()
+    renderables: list[Any] = []
+    markdown_buffer: list[str] = []
+    i = 0
+
+    def flush_markdown() -> None:
+        if not markdown_buffer:
+            return
+        chunk = "\n".join(markdown_buffer).strip("\n")
+        markdown_buffer.clear()
+        if chunk.strip():
+            renderables.append(Markdown(chunk))
+
+    while i < len(lines):
+        if i + 1 < len(lines) and _is_markdown_table_row(lines[i]) and _MD_TABLE_SEPARATOR_RE.match(lines[i + 1] or ""):
+            flush_markdown()
+            header_line = lines[i]
+            i += 2  # skip separator row
+            table_rows: list[str] = []
+            while i < len(lines) and _is_markdown_table_row(lines[i]):
+                table_rows.append(lines[i])
+                i += 1
+            table = _build_markdown_table_renderable(header_line, table_rows)
+            if table is not None:
+                renderables.append(table)
+            continue
+        markdown_buffer.append(lines[i])
+        i += 1
+
+    flush_markdown()
+    if not renderables:
+        return _rich_text_from_ansi(cleaned)
+    if len(renderables) == 1:
+        return renderables[0]
+    return Group(*renderables)
+
+
+def _table_only_renderable(text: str):
+    """Extract and render markdown tables only, for streamed-response table polish."""
+    cleaned = _strip_ansi_text(text).replace("\r\n", "\n").replace("\r", "\n")
+    lines = cleaned.splitlines()
+    tables: list[Any] = []
+    i = 0
+    while i < len(lines):
+        if i + 1 < len(lines) and _is_markdown_table_row(lines[i]) and _MD_TABLE_SEPARATOR_RE.match(lines[i + 1] or ""):
+            header_line = lines[i]
+            i += 2
+            table_rows: list[str] = []
+            while i < len(lines) and _is_markdown_table_row(lines[i]):
+                table_rows.append(lines[i])
+                i += 1
+            table = _build_markdown_table_renderable(header_line, table_rows)
+            if table is not None:
+                tables.append(table)
+            continue
+        i += 1
+    if not tables:
+        return None
+    return Group(*tables) if len(tables) > 1 else tables[0]
 
 
 def _cprint(text: str):
@@ -3963,7 +4110,7 @@ class HermesCLI:
 
                     _chat_console = ChatConsole()
                     _chat_console.print(Panel(
-                        _rich_text_from_ansi(response),
+                        _response_renderable(response),
                         title=f"[{_resp_color} bold]{label} (background #{task_num})[/]",
                         title_align="left",
                         border_style=_resp_color,
@@ -4457,7 +4604,16 @@ class HermesCLI:
                 logging.getLogger(noisy).setLevel(logging.WARNING)
         else:
             logging.getLogger().setLevel(logging.INFO)
-            for quiet_logger in ('tools', 'minisweagent', 'run_agent', 'trajectory_compressor', 'cron', 'hermes_cli'):
+            for quiet_logger in (
+                'tools',
+                'tools.environments',
+                'minisweagent',
+                'minisweagent.environment',
+                'run_agent',
+                'trajectory_compressor',
+                'cron',
+                'hermes_cli',
+            ):
                 logging.getLogger(quiet_logger).setLevel(logging.ERROR)
 
     def _show_insights(self, command: str = "/insights"):
@@ -5657,13 +5813,26 @@ class HermesCLI:
                     w = shutil.get_terminal_size().columns
                     _cprint(f"\n{_GOLD}╰{'─' * (w - 2)}╯{_RST}")
                 elif already_streamed:
-                    # Response was already streamed token-by-token with box framing;
-                    # _flush_stream() already closed the box. Skip Rich Panel.
-                    pass
+                    # Response was already streamed token-by-token with box framing.
+                    # When the content contains markdown tables, print a compact
+                    # rich-rendered table view below the stream so tables are readable.
+                    if _response_contains_markdown_table(response):
+                        table_view = _table_only_renderable(response)
+                        if table_view is not None:
+                            _chat_console = ChatConsole()
+                            _chat_console.print(Panel(
+                                table_view,
+                                title=f"[{_resp_color} bold]{label} Tables[/]",
+                                title_align="left",
+                                border_style=_resp_color,
+                                style=_resp_text,
+                                box=rich_box.HORIZONTALS,
+                                padding=(0, 1),
+                            ))
                 else:
                     _chat_console = ChatConsole()
                     _chat_console.print(Panel(
-                        _rich_text_from_ansi(response),
+                        _response_renderable(response),
                         title=f"[{_resp_color} bold]{label}[/]",
                         title_align="left",
                         border_style=_resp_color,

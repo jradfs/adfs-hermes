@@ -321,11 +321,17 @@ class DockerEnvironment(BaseEnvironment):
         # Resolve the docker executable once so it works even when
         # /usr/local/bin is not in PATH (common on macOS gateway/service).
         docker_exe = find_docker() or "docker"
+        inner_logger = logging.getLogger("minisweagent.environment.quiet")
+        inner_logger.handlers = []
+        inner_logger.addHandler(logging.NullHandler())
+        inner_logger.setLevel(logging.ERROR)
+        inner_logger.propagate = False
 
         self._inner = _Docker(
             image=image, cwd=cwd, timeout=timeout,
             run_args=all_run_args,
             executable=docker_exe,
+            logger=inner_logger,
         )
         self._container_id = self._inner.container_id
 
