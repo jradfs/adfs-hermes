@@ -834,6 +834,43 @@ def _skin_table_style() -> tuple[str, str, str]:
         return "#8B5A14", "#17212F", "#0F766E"
 
 
+def _column_justify(header: str) -> str:
+    normalized = (header or "").strip().lower()
+    if normalized in {"balance", "amount", "value", "total", "debit", "credit", "price"}:
+        return "right"
+    if normalized in {"status"}:
+        return "center"
+    return "left"
+
+
+def _style_table_cell(header: str, value: str, text_color: str) -> str:
+    normalized_header = (header or "").strip().lower()
+    raw = (value or "").strip()
+    normalized_value = raw.upper()
+
+    if normalized_header == "status":
+        status_colors = {
+            "RED": "bold #B42318",
+            "YELLOW": "bold #B54708",
+            "AMBER": "bold #B54708",
+            "GREEN": "bold #027A48",
+            "OK": "bold #027A48",
+            "CONNECTED": "bold #027A48",
+            "LIVE": "bold #027A48",
+        }
+        color = status_colors.get(normalized_value)
+        if color:
+            return f"[{color}]{raw}[/]"
+
+    if normalized_header in {"balance", "amount", "value", "total", "debit", "credit"}:
+        if raw.startswith("-$") or raw.startswith("-"):
+            return f"[bold #B42318]{raw}[/]"
+        if raw.startswith("$"):
+            return f"[bold {text_color}]{raw}[/]"
+
+    return raw
+
+
 def _build_markdown_table_renderable(header_line: str, row_lines: list[str]) -> _RichTable | None:
     headers = _split_markdown_table_row(header_line)
     if not headers:
@@ -850,7 +887,12 @@ def _build_markdown_table_renderable(header_line: str, row_lines: list[str]) -> 
         show_lines=False,
     )
     for header in headers:
-        table.add_column(header or " ", style=text_color, overflow="fold")
+        table.add_column(
+            header or " ",
+            style=text_color,
+            overflow="fold",
+            justify=_column_justify(header),
+        )
 
     for raw_row in row_lines:
         cells = _split_markdown_table_row(raw_row)
@@ -860,7 +902,11 @@ def _build_markdown_table_renderable(header_line: str, row_lines: list[str]) -> 
             cells.extend([""] * (len(headers) - len(cells)))
         elif len(cells) > len(headers):
             cells = cells[:len(headers)]
-        table.add_row(*cells)
+        styled_cells = [
+            _style_table_cell(header, cell, text_color)
+            for header, cell in zip(headers, cells)
+        ]
+        table.add_row(*styled_cells)
 
     return table
 
@@ -1839,26 +1885,7 @@ class HermesCLI:
             _cprint(f"{_GOLD}╰{'─' * (w - 2)}╯{_RST}")
             self._stream_box_opened = False
 
-        try:
-            from hermes_cli.skin_engine import get_active_skin
-            _skin = get_active_skin()
-            label = _skin.get_branding("response_label", "⚕ Hermes")
-            _resp_color = _skin.get_color("response_border", "#CD7F32")
-            _resp_text = _skin.get_color("banner_text", "#FFF8DC")
-        except Exception:
-            label = "⚕ Hermes"
-            _resp_color = "#CD7F32"
-            _resp_text = "#FFF8DC"
-
-        ChatConsole().print(Panel(
-            table_view,
-            title=f"[{_resp_color} bold]{label} Table[/]",
-            title_align="left",
-            border_style=_resp_color,
-            style=_resp_text,
-            box=rich_box.HORIZONTALS,
-            padding=(0, 1),
-        ))
+        ChatConsole().print(table_view)
         self._stream_rendered_inline_table = True
         return True
 
@@ -5905,15 +5932,7 @@ class HermesCLI:
                         table_view = _table_only_renderable(response)
                         if table_view is not None:
                             _chat_console = ChatConsole()
-                            _chat_console.print(Panel(
-                                table_view,
-                                title=f"[{_resp_color} bold]{label} Tables[/]",
-                                title_align="left",
-                                border_style=_resp_color,
-                                style=_resp_text,
-                                box=rich_box.HORIZONTALS,
-                                padding=(0, 1),
-                            ))
+                            _chat_console.print(table_view)
                 else:
                     _chat_console = ChatConsole()
                     _chat_console.print(Panel(
