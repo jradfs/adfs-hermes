@@ -92,6 +92,10 @@ fi
 mkdir -p "$TARGET_HOME/skins"
 cp "$SKIN_SOURCE" "$TARGET_HOME/skins/light-paper.yaml"
 
+log "Syncing bundled skills into $TARGET_HOME"
+HERMES_HOME="$TARGET_HOME" "$REPO_DIR/venv/bin/python" "$REPO_DIR/tools/skills_sync.py" >/dev/null \
+  || warn "Bundled skills sync skipped"
+
 log "Writing ADFS Hermes runtime defaults"
 HERMES_HOME="$TARGET_HOME" SANDBOX_DIR="$SANDBOX_DIR" QBO_REPO="$QBO_REPO" FIRM_REPO="$FIRM_REPO" ADFS_CONFIG_DIR="$ADFS_CONFIG_DIR" "$REPO_DIR/venv/bin/python" - <<'PY'
 from pathlib import Path
