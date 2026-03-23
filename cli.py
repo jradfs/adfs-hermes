@@ -2582,18 +2582,18 @@ class HermesCLI:
     def _list_resume_candidates(self, limit: int = 12) -> None:
         """Print recent CLI sessions that can be resumed from the chat."""
         if not self._session_db:
-            self.console.print("[bold red]Session database not available.[/]")
+            ChatConsole().print("[bold red]Session database not available.[/]")
             return
 
         try:
             sessions = self._session_db.list_sessions_rich(source="cli", limit=limit)
         except Exception as e:
-            self.console.print(f"[bold red]Could not load sessions: {e}[/]")
+            ChatConsole().print(f"[bold red]Could not load sessions: {e}[/]")
             return
 
         sessions = [s for s in sessions if s.get("id") != self.session_id]
         if not sessions:
-            self.console.print("[dim]No past CLI sessions found.[/]")
+            ChatConsole().print("[dim]No past CLI sessions found.[/]")
             return
 
         lines = ["[bold]Recent CLI Sessions[/bold]"]
@@ -2615,12 +2615,125 @@ class HermesCLI:
             f"[dim]Use /resume <session_id_or_title> to switch. "
             f"For exact terminal resume, `{os.path.basename(sys.argv[0])} --continue` still works.[/]"
         )
-        self.console.print("\n".join(lines))
+        ChatConsole().print("\n".join(lines))
+
+    def _search_resume_candidates(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
+        """Search CLI sessions by title, preview, and transcript content."""
+        if not self._session_db:
+            return []
+
+        query = (query or "").strip()
+        if not query:
+            return []
+
+        results_by_id: dict[str, dict[str, Any]] = {}
+
+        # 1. Search transcript content via FTS.
+        fts_queries = [query]
+        terms = [term for term in re.split(r"\s+", query) if term.strip()]
+        if len(terms) > 1 and not re.search(r"\b(?:AND|OR|NOT)\b|[\"*]", query, flags=re.IGNORECASE):
+            fts_queries.append(" OR ".join(terms))
+
+        for fts_query in fts_queries:
+            try:
+                raw_matches = self._session_db.search_messages(
+                    fts_query,
+                    source_filter=["cli"],
+                    role_filter=["user", "assistant"],
+                    limit=60,
+                )
+            except Exception:
+                raw_matches = []
+
+            for match in raw_matches:
+                sid = match.get("session_id")
+                if not sid or sid == self.session_id or sid in results_by_id:
+                    continue
+                meta = self._session_db.get_session(sid) or {}
+                preview = ""
+                try:
+                    rich_list = self._session_db.list_sessions_rich(source="cli", limit=200)
+                    meta_map = {s["id"]: s for s in rich_list}
+                    preview = (meta_map.get(sid) or {}).get("preview", "")
+                except Exception:
+                    preview = ""
+                results_by_id[sid] = {
+                    "id": sid,
+                    "title": meta.get("title"),
+                    "preview": preview,
+                    "last_active": match.get("timestamp") or meta.get("started_at"),
+                    "source": "content",
+                    "snippet": match.get("snippet") or "",
+                }
+                if len(results_by_id) >= limit:
+                    break
+            if len(results_by_id) >= limit:
+                break
+
+        # 2. Search recent session metadata by title/preview substring.
+        try:
+            recent = self._session_db.list_sessions_rich(source="cli", limit=200)
+        except Exception:
+            recent = []
+
+        q_lower = query.lower()
+        for session in recent:
+            sid = session.get("id")
+            if not sid or sid == self.session_id or sid in results_by_id:
+                continue
+            haystacks = [
+                (session.get("title") or "").lower(),
+                (session.get("preview") or "").lower(),
+            ]
+            if any(q_lower in hay for hay in haystacks if hay):
+                results_by_id[sid] = {
+                    "id": sid,
+                    "title": session.get("title"),
+                    "preview": session.get("preview", ""),
+                    "last_active": session.get("last_active") or session.get("started_at"),
+                    "source": "metadata",
+                    "snippet": "",
+                }
+                if len(results_by_id) >= limit:
+                    break
+
+        ordered = sorted(
+            results_by_id.values(),
+            key=lambda item: item.get("last_active") or 0,
+            reverse=True,
+        )
+        return ordered[:limit]
+
+    def _show_resume_search_results(self, query: str, matches: list[dict[str, Any]]) -> None:
+        """Render fuzzy session-search matches cleanly inside the chat."""
+        if not matches:
+            ChatConsole().print(
+                f"[bold red]No session found matching:[/] [bold]{_escape(query)}[/]\n"
+                f"[dim]Try /resume for recent sessions, or use a narrower query like a client name.[/]"
+            )
+            return
+
+        lines = [f"[bold]Session Matches[/bold] for [bold]{_escape(query)}[/]"]
+        for idx, match in enumerate(matches, 1):
+            title = (match.get("title") or "Untitled").strip()
+            sid = match.get("id", "")
+            last_label = _relative_time(match.get("last_active"))
+            preview = (match.get("preview") or "").strip()
+            snippet = _strip_ansi_text(match.get("snippet") or "").replace(">>>", "").replace("<<<", "")
+            detail = preview or snippet
+            detail = detail[:100] + ("..." if len(detail) > 100 else "") if detail else ""
+            detail_part = f" — {detail}" if detail else ""
+            lines.append(
+                f"{idx}. [bold]{_escape(title)}[/bold] [{_escape(sid)}] ({last_label}){_escape(detail_part)}"
+            )
+        lines.append("")
+        lines.append("[dim]Use /resume <session_id> to switch to one of these sessions.[/]")
+        ChatConsole().print("\n".join(lines))
 
     def _resume_session_in_chat(self, target: str) -> bool:
         """Switch the active CLI chat to a previous session by ID or title."""
         if not self._session_db:
-            self.console.print("[bold red]Session database not available.[/]")
+            ChatConsole().print("[bold red]Session database not available.[/]")
             return False
 
         query = (target or "").strip()
@@ -2632,17 +2745,12 @@ class HermesCLI:
         if not resolved_id:
             resolved_id = self._session_db.resolve_session_by_title(query)
         if not resolved_id:
-            self.console.print(
-                f"[bold red]No session found matching:[/] [bold]{_escape(query)}[/]"
-            )
-            self.console.print(
-                f"[dim]Try /resume with no arguments to list recent sessions, "
-                f"or `{os.path.basename(sys.argv[0])} sessions list` for the full list.[/]"
-            )
+            matches = self._search_resume_candidates(query)
+            self._show_resume_search_results(query, matches)
             return True
 
         if resolved_id == self.session_id:
-            self.console.print(
+            ChatConsole().print(
                 f"[dim]Already on session[/] [bold]{_escape(resolved_id)}[/bold]"
             )
             return True
