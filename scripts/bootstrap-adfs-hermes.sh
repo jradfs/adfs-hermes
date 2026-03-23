@@ -10,6 +10,7 @@ SANDBOX_DIR="${ADFS_HERMES_SANDBOX:-$HOME/hermes-sandbox}"
 QBO_REPO="${ADFS_QBO_REPO:-$HOME/Documents/CodingProjects/adfs-qbo-mcp}"
 FIRM_REPO="${ADFS_FIRM_REPO:-$HOME/Documents/CodingProjects/adfs-firm-supabase-mcp}"
 ADFS_CONFIG_DIR="${ADFS_SHARED_CONFIG_DIR:-$HOME/.config/adfs}"
+QBO_STATE_DIR="${ADFS_QBO_STATE_DIR:-$TARGET_HOME/qbo-state}"
 LAUNCHER_PATH="$HOME/.local/bin/adfs-hermes"
 SKIN_SOURCE="$REPO_DIR/assets/skins/light-paper.yaml"
 
@@ -46,7 +47,7 @@ copy_if_exists() {
   fi
 }
 
-mkdir -p "$TARGET_HOME" "$SANDBOX_DIR" "$HOME/.local/bin"
+mkdir -p "$TARGET_HOME" "$SANDBOX_DIR" "$HOME/.local/bin" "$QBO_STATE_DIR"
 mkdir -p "$SANDBOX_DIR/bin"
 
 log "Initializing git submodules"
@@ -97,7 +98,7 @@ HERMES_HOME="$TARGET_HOME" "$REPO_DIR/venv/bin/python" "$REPO_DIR/tools/skills_s
   || warn "Bundled skills sync skipped"
 
 log "Writing ADFS Hermes runtime defaults"
-HERMES_HOME="$TARGET_HOME" SANDBOX_DIR="$SANDBOX_DIR" QBO_REPO="$QBO_REPO" FIRM_REPO="$FIRM_REPO" ADFS_CONFIG_DIR="$ADFS_CONFIG_DIR" "$REPO_DIR/venv/bin/python" - <<'PY'
+HERMES_HOME="$TARGET_HOME" SANDBOX_DIR="$SANDBOX_DIR" QBO_REPO="$QBO_REPO" FIRM_REPO="$FIRM_REPO" ADFS_CONFIG_DIR="$ADFS_CONFIG_DIR" QBO_STATE_DIR="$QBO_STATE_DIR" "$REPO_DIR/venv/bin/python" - <<'PY'
 from pathlib import Path
 import os
 import yaml
@@ -107,6 +108,7 @@ sandbox = Path(os.environ["SANDBOX_DIR"])
 qbo_repo = Path(os.environ["QBO_REPO"]).expanduser()
 firm_repo = Path(os.environ["FIRM_REPO"]).expanduser()
 adfs_config_dir = Path(os.environ["ADFS_CONFIG_DIR"]).expanduser()
+qbo_state_dir = Path(os.environ["QBO_STATE_DIR"]).expanduser()
 config_path = home / "config.yaml"
 
 if config_path.exists():
@@ -152,6 +154,8 @@ if firm_repo.exists():
     docker_volumes.append(f"{firm_repo}:/opt/adfs-firm")
 if adfs_config_dir.exists():
     docker_volumes.append(f"{adfs_config_dir}:/root/.config/adfs")
+qbo_state_dir.mkdir(parents=True, exist_ok=True)
+docker_volumes.append(f"{qbo_state_dir}:/root/.local/share/opencode/qbo")
 terminal["docker_volumes"] = docker_volumes
 terminal["lifetime_seconds"] = 900
 
@@ -192,6 +196,7 @@ if [ -n "$ADFS_ENV_FILE" ]; then
   set +a
 fi
 export ADFS_SHARED_ENV_FILE="${ADFS_SHARED_ENV_FILE:-${ADFS_ENV_FILE:-/root/.config/adfs/qbo.env}}"
+export QBO_BASE_DIR="${QBO_BASE_DIR:-/root/.local/share/opencode/qbo}"
 exec node /opt/adfs-qbo-mcp/bin/qbo.js "$@"
 EOF
 chmod +x "$SANDBOX_DIR/bin/qbo"
@@ -225,6 +230,7 @@ ADFS Hermes firm CLI lane
 - QBO repo mount: /opt/adfs-qbo-mcp
 - Firm repo mount: /opt/adfs-firm
 - Shared env dir: /root/.config/adfs
+- Persistent QBO state: /root/.local/share/opencode/qbo
 
 Examples:
   /pilot/bin/qbo companies

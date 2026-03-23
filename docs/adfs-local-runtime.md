@@ -51,6 +51,7 @@ Container mounts:
 - `/opt/adfs-qbo-mcp`
 - `/opt/adfs-firm`
 - `/root/.config/adfs`
+- `/root/.local/share/opencode/qbo`
 
 Wrapper commands inside the container:
 
@@ -71,4 +72,5 @@ Examples from inside Hermes terminal use:
 - `adfs-hermes` uses `HERMES_HOME=~/.adfs-hermes`
 - the default terminal backend remains Docker
 - runtime state is separate from `~/.hermes`
+- QBO token/session state is persisted under `~/.adfs-hermes/qbo-state`
 - this fork should be the home for ADFS-specific runtime improvements
