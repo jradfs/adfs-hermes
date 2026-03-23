@@ -272,3 +272,49 @@ class TestSessionSearch:
         assert result["count"] == 0
         assert result["results"] == []
         assert result["sessions_searched"] == 0
+
+    def test_falls_back_to_excerpt_summary_when_aux_model_unavailable(self):
+        from unittest.mock import AsyncMock, MagicMock, patch as _patch
+        from tools.session_search_tool import session_search
+
+        mock_db = MagicMock()
+        mock_db.search_messages.return_value = [
+            {"session_id": "older_sid", "snippet": "Fresko match", "source": "cli",
+             "session_started": 1709400000, "model": "test"},
+        ]
+        mock_db.get_session.return_value = {"parent_session_id": None, "started_at": 1709400000, "source": "cli"}
+        mock_db.get_messages_as_conversation.return_value = [
+            {"role": "user", "content": "Connect Fresko Cement to QBO"},
+            {"role": "assistant", "content": "Connected Fresko Cement successfully."},
+        ]
+
+        with _patch("tools.session_search_tool.async_call_llm",
+                    new_callable=AsyncMock,
+                    side_effect=RuntimeError("no provider")):
+            result = json.loads(session_search(query="Fresko Cement", db=mock_db))
+
+        assert result["success"] is True
+        assert result["count"] == 1
+        assert "Fresko" in result["results"][0]["summary"]
+
+    def test_retries_plain_multiword_query_as_or_query(self):
+        from unittest.mock import MagicMock
+        from tools.session_search_tool import session_search
+
+        mock_db = MagicMock()
+        mock_db.search_messages.side_effect = [
+            [],
+            [{"session_id": "older_sid", "snippet": "Fresko match", "source": "cli",
+              "session_started": 1709400000, "model": "test"}],
+        ]
+        mock_db.get_session.return_value = {"parent_session_id": None, "started_at": 1709400000, "source": "cli"}
+        mock_db.get_messages_as_conversation.return_value = [
+            {"role": "user", "content": "Review Fresko books"},
+            {"role": "assistant", "content": "Reviewed Cement company context."},
+        ]
+
+        result = json.loads(session_search(query="Fresko Cement", db=mock_db))
+
+        assert result["success"] is True
+        assert result["effective_query"] == "Fresko OR Cement"
+        assert result["count"] == 1

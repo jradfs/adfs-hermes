@@ -20,11 +20,31 @@ import concurrent.futures
 import json
 import os
 import logging
+import re
 from typing import Dict, Any, List, Optional, Union
 
 from agent.auxiliary_client import async_call_llm
 MAX_SESSION_CHARS = 100_000
 MAX_SUMMARY_TOKENS = 10000
+
+
+def _has_explicit_fts_syntax(query: str) -> bool:
+    """Return True when the user appears to be intentionally using FTS syntax."""
+    if not query:
+        return False
+    if '"' in query or "*" in query:
+        return True
+    return bool(re.search(r"\b(?:AND|OR|NOT)\b", query, flags=re.IGNORECASE))
+
+
+def _build_or_query(query: str) -> Optional[str]:
+    """Expand a plain multi-word query into an OR query for broader recall."""
+    if not query or _has_explicit_fts_syntax(query):
+        return None
+    terms = [t.strip() for t in re.split(r"\s+", query.strip()) if t.strip()]
+    if len(terms) < 2:
+        return None
+    return " OR ".join(terms)
 
 
 def _format_timestamp(ts: Union[int, float, str, None]) -> str:
@@ -123,6 +143,61 @@ def _truncate_around_matches(
     return prefix + truncated + suffix
 
 
+def _build_fallback_summary(
+    messages: List[Dict[str, Any]],
+    query: str,
+    session_meta: Dict[str, Any],
+    match_info: Dict[str, Any],
+) -> str:
+    """Deterministic summary when the auxiliary summarizer is unavailable."""
+    query_terms = [t.lower() for t in re.split(r"\s+", query) if t.strip()]
+    highlights: List[str] = []
+    first_user: Optional[str] = None
+    last_assistant: Optional[str] = None
+
+    for msg in messages:
+        role = (msg.get("role") or "unknown").lower()
+        content = (msg.get("content") or "").strip()
+        if not content:
+            continue
+
+        single_line = " ".join(content.split())
+        if role == "user" and not first_user:
+            first_user = single_line[:240]
+        if role == "assistant":
+            last_assistant = single_line[:240]
+
+        haystack = single_line.lower()
+        if query_terms and not any(term in haystack for term in query_terms):
+            continue
+
+        label = role.upper()
+        tool_name = msg.get("tool_name")
+        if role == "tool" and tool_name:
+            label = f"TOOL:{tool_name}"
+        snippet = single_line[:220]
+        highlights.append(f"- {label}: {snippet}")
+        if len(highlights) >= 4:
+            break
+
+    summary_parts = []
+    source = session_meta.get("source") or match_info.get("source") or "unknown"
+    when = _format_timestamp(
+        session_meta.get("started_at") or match_info.get("session_started")
+    )
+    summary_parts.append(f"Past session from {when} via {source}.")
+    if first_user:
+        summary_parts.append(f"Original request: {first_user}")
+    if highlights:
+        summary_parts.append("Relevant excerpts:")
+        summary_parts.extend(highlights)
+    if last_assistant:
+        summary_parts.append(f"Latest assistant outcome: {last_assistant}")
+    elif match_info.get("snippet"):
+        summary_parts.append(f"Match snippet: {match_info['snippet']}")
+    return "\n".join(summary_parts)
+
+
 async def _summarize_session(
     conversation_text: str, query: str, session_meta: Dict[str, Any]
 ) -> Optional[str]:
@@ -207,23 +282,6 @@ def session_search(
         if role_filter and role_filter.strip():
             role_list = [r.strip() for r in role_filter.split(",") if r.strip()]
 
-        # FTS5 search -- get matches ranked by relevance
-        raw_results = db.search_messages(
-            query=query,
-            role_filter=role_list,
-            limit=50,  # Get more matches to find unique sessions
-            offset=0,
-        )
-
-        if not raw_results:
-            return json.dumps({
-                "success": True,
-                "query": query,
-                "results": [],
-                "count": 0,
-                "message": "No matching sessions found.",
-            }, ensure_ascii=False)
-
         # Resolve child sessions to their parent — delegation stores detailed
         # content in child sessions, but the user's conversation is the parent.
         def _resolve_to_parent(session_id: str) -> str:
@@ -255,25 +313,50 @@ def session_search(
             _resolve_to_parent(current_session_id) if current_session_id else None
         )
 
-        # Group by resolved (parent) session_id, dedup, skip the current
-        # session lineage. Compression and delegation create child sessions
-        # that still belong to the same active conversation.
-        seen_sessions = {}
-        for result in raw_results:
-            raw_sid = result["session_id"]
-            resolved_sid = _resolve_to_parent(raw_sid)
-            # Skip the current session lineage — the agent already has that
-            # context, even if older turns live in parent fragments.
-            if current_lineage_root and resolved_sid == current_lineage_root:
-                continue
-            if current_session_id and raw_sid == current_session_id:
-                continue
-            if resolved_sid not in seen_sessions:
-                result = dict(result)
-                result["session_id"] = resolved_sid
-                seen_sessions[resolved_sid] = result
-            if len(seen_sessions) >= limit:
-                break
+        def _collect_sessions(search_query: str) -> Dict[str, Dict[str, Any]]:
+            raw_results = db.search_messages(
+                query=search_query,
+                role_filter=role_list,
+                limit=max(200, limit * 40),
+                offset=0,
+            )
+            seen_sessions: Dict[str, Dict[str, Any]] = {}
+            for result in raw_results:
+                raw_sid = result["session_id"]
+                resolved_sid = _resolve_to_parent(raw_sid)
+                if current_lineage_root and resolved_sid == current_lineage_root:
+                    continue
+                if current_session_id and raw_sid == current_session_id:
+                    continue
+                if resolved_sid not in seen_sessions:
+                    result = dict(result)
+                    result["session_id"] = resolved_sid
+                    seen_sessions[resolved_sid] = result
+                if len(seen_sessions) >= limit:
+                    break
+            return seen_sessions
+
+        seen_sessions = _collect_sessions(query)
+        search_strategy = query
+
+        if not seen_sessions:
+            alt_query = _build_or_query(query)
+            if alt_query:
+                alt_seen_sessions = _collect_sessions(alt_query)
+                if alt_seen_sessions:
+                    seen_sessions = alt_seen_sessions
+                    search_strategy = alt_query
+
+        if not seen_sessions:
+            return json.dumps({
+                "success": True,
+                "query": query,
+                "effective_query": search_strategy,
+                "results": [],
+                "count": 0,
+                "sessions_searched": 0,
+                "message": "No matching sessions found.",
+            }, ensure_ascii=False)
 
         # Prepare all sessions for parallel summarization
         tasks = []
@@ -285,7 +368,7 @@ def session_search(
                 session_meta = db.get_session(session_id) or {}
                 conversation_text = _format_conversation(messages)
                 conversation_text = _truncate_around_matches(conversation_text, query)
-                tasks.append((session_id, match_info, conversation_text, session_meta))
+                tasks.append((session_id, match_info, conversation_text, session_meta, messages))
             except Exception as e:
                 logging.warning(
                     "Failed to prepare session %s: %s",
@@ -299,7 +382,7 @@ def session_search(
             """Summarize all sessions in parallel."""
             coros = [
                 _summarize_session(text, query, meta)
-                for _, _, text, meta in tasks
+                for _, _, text, meta, _ in tasks
             ]
             return await asyncio.gather(*coros, return_exceptions=True)
 
@@ -321,7 +404,8 @@ def session_search(
             }, ensure_ascii=False)
 
         summaries = []
-        for (session_id, match_info, _, _), result in zip(tasks, results):
+        for (session_id, match_info, _, session_meta, messages), result in zip(tasks, results):
+            summary_text: Optional[str] = None
             if isinstance(result, Exception):
                 logging.warning(
                     "Failed to summarize session %s: %s",
@@ -329,19 +413,29 @@ def session_search(
                     result,
                     exc_info=True,
                 )
-                continue
-            if result:
-                summaries.append({
-                    "session_id": session_id,
-                    "when": _format_timestamp(match_info.get("session_started")),
-                    "source": match_info.get("source", "unknown"),
-                    "model": match_info.get("model"),
-                    "summary": result,
-                })
+            elif result:
+                summary_text = result
+
+            if not summary_text:
+                summary_text = _build_fallback_summary(
+                    messages=messages,
+                    query=query,
+                    session_meta=session_meta,
+                    match_info=match_info,
+                )
+
+            summaries.append({
+                "session_id": session_id,
+                "when": _format_timestamp(match_info.get("session_started")),
+                "source": match_info.get("source", "unknown"),
+                "model": match_info.get("model"),
+                "summary": summary_text,
+            })
 
         return json.dumps({
             "success": True,
             "query": query,
+            "effective_query": search_strategy,
             "results": summaries,
             "count": len(summaries),
             "sessions_searched": len(seen_sessions),

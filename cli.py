@@ -4034,6 +4034,10 @@ class HermesCLI:
                         self._pending_input.put(msg)
                 else:
                     self.console.print(f"[bold red]Failed to load skill for {base_cmd}[/]")
+            elif base_cmd == "/resume":
+                _cprint(f"{_GOLD}/resume isn't a chat command in the CLI.{_RST}")
+                _cprint(f"{_DIM}Use `{os.path.basename(sys.argv[0])} --continue` to reopen the latest session,{_RST}")
+                _cprint(f"{_DIM}or `{os.path.basename(sys.argv[0])} sessions list` then `{os.path.basename(sys.argv[0])} --resume <session_id>`. {_RST}")
             else:
                 # Prefix matching: if input uniquely identifies one command, execute it.
                 # Matches against both built-in COMMANDS and installed skill commands so
