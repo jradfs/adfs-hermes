@@ -7,6 +7,9 @@ REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SOURCE_HOME="${SOURCE_HERMES_HOME:-$HOME/.hermes}"
 TARGET_HOME="${ADFS_HERMES_HOME:-$HOME/.adfs-hermes}"
 SANDBOX_DIR="${ADFS_HERMES_SANDBOX:-$HOME/hermes-sandbox}"
+QBO_REPO="${ADFS_QBO_REPO:-$HOME/Documents/CodingProjects/adfs-qbo-mcp}"
+FIRM_REPO="${ADFS_FIRM_REPO:-$HOME/Documents/CodingProjects/adfs-firm-supabase-mcp}"
+ADFS_CONFIG_DIR="${ADFS_SHARED_CONFIG_DIR:-$HOME/.config/adfs}"
 LAUNCHER_PATH="$HOME/.local/bin/adfs-hermes"
 SKIN_SOURCE="$REPO_DIR/assets/skins/light-paper.yaml"
 
@@ -44,6 +47,7 @@ copy_if_exists() {
 }
 
 mkdir -p "$TARGET_HOME" "$SANDBOX_DIR" "$HOME/.local/bin"
+mkdir -p "$SANDBOX_DIR/bin"
 
 log "Initializing git submodules"
 git -C "$REPO_DIR" submodule update --init --recursive
@@ -89,13 +93,16 @@ mkdir -p "$TARGET_HOME/skins"
 cp "$SKIN_SOURCE" "$TARGET_HOME/skins/light-paper.yaml"
 
 log "Writing ADFS Hermes runtime defaults"
-HERMES_HOME="$TARGET_HOME" SANDBOX_DIR="$SANDBOX_DIR" "$REPO_DIR/venv/bin/python" - <<'PY'
+HERMES_HOME="$TARGET_HOME" SANDBOX_DIR="$SANDBOX_DIR" QBO_REPO="$QBO_REPO" FIRM_REPO="$FIRM_REPO" ADFS_CONFIG_DIR="$ADFS_CONFIG_DIR" "$REPO_DIR/venv/bin/python" - <<'PY'
 from pathlib import Path
 import os
 import yaml
 
 home = Path(os.environ["HERMES_HOME"])
 sandbox = Path(os.environ["SANDBOX_DIR"])
+qbo_repo = Path(os.environ["QBO_REPO"]).expanduser()
+firm_repo = Path(os.environ["FIRM_REPO"]).expanduser()
+adfs_config_dir = Path(os.environ["ADFS_CONFIG_DIR"]).expanduser()
 config_path = home / "config.yaml"
 
 if config_path.exists():
@@ -134,7 +141,14 @@ terminal["container_cpu"] = 2
 terminal["container_memory"] = 8192
 terminal["container_disk"] = 20480
 terminal["container_persistent"] = False
-terminal["docker_volumes"] = [f"{sandbox}:/pilot"]
+docker_volumes = [f"{sandbox}:/pilot"]
+if qbo_repo.exists():
+    docker_volumes.append(f"{qbo_repo}:/opt/adfs-qbo-mcp")
+if firm_repo.exists():
+    docker_volumes.append(f"{firm_repo}:/opt/adfs-firm")
+if adfs_config_dir.exists():
+    docker_volumes.append(f"{adfs_config_dir}:/root/.config/adfs")
+terminal["docker_volumes"] = docker_volumes
 terminal["lifetime_seconds"] = 900
 
 memory = data.setdefault("memory", {})
@@ -157,6 +171,65 @@ if not toolsets:
 
 config_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 PY
+
+log "Installing CLI wrapper helpers into sandbox"
+cat > "$SANDBOX_DIR/bin/qbo" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+ADFS_ENV_FILE=""
+if [ -r /root/.config/adfs/runtime.env ] && [ ! -L /root/.config/adfs/runtime.env ]; then
+  ADFS_ENV_FILE=/root/.config/adfs/runtime.env
+elif [ -r /root/.config/adfs/qbo.env ]; then
+  ADFS_ENV_FILE=/root/.config/adfs/qbo.env
+fi
+if [ -n "$ADFS_ENV_FILE" ]; then
+  set -a
+  source "$ADFS_ENV_FILE"
+  set +a
+fi
+export ADFS_SHARED_ENV_FILE="${ADFS_SHARED_ENV_FILE:-${ADFS_ENV_FILE:-/root/.config/adfs/qbo.env}}"
+exec node /opt/adfs-qbo-mcp/bin/qbo.js "$@"
+EOF
+chmod +x "$SANDBOX_DIR/bin/qbo"
+
+cat > "$SANDBOX_DIR/bin/adfs-firm" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+ADFS_ENV_FILE=""
+if [ -r /root/.config/adfs/runtime.env ] && [ ! -L /root/.config/adfs/runtime.env ]; then
+  ADFS_ENV_FILE=/root/.config/adfs/runtime.env
+elif [ -r /root/.config/adfs/qbo.env ]; then
+  ADFS_ENV_FILE=/root/.config/adfs/qbo.env
+fi
+if [ -n "$ADFS_ENV_FILE" ]; then
+  set -a
+  source "$ADFS_ENV_FILE"
+  set +a
+fi
+export DEFAULT_WRITE_SOURCE="${DEFAULT_WRITE_SOURCE:-adfs-hermes}"
+exec node /opt/adfs-firm/dist/cli.js "$@"
+EOF
+chmod +x "$SANDBOX_DIR/bin/adfs-firm"
+
+cat > "$SANDBOX_DIR/bin/adfs-tools-info" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+cat <<INFO
+ADFS Hermes firm CLI lane
+- qbo wrapper: /pilot/bin/qbo
+- adfs-firm wrapper: /pilot/bin/adfs-firm
+- QBO repo mount: /opt/adfs-qbo-mcp
+- Firm repo mount: /opt/adfs-firm
+- Shared env dir: /root/.config/adfs
+
+Examples:
+  /pilot/bin/qbo companies
+  /pilot/bin/qbo report pnl --realm-id <realm_id>
+  /pilot/bin/adfs-firm health
+  /pilot/bin/adfs-firm client find --query "ACME"
+INFO
+EOF
+chmod +x "$SANDBOX_DIR/bin/adfs-tools-info"
 
 cat > "$LAUNCHER_PATH" <<EOF
 #!/bin/bash

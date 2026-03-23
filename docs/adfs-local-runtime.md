@@ -41,6 +41,31 @@ cd ~/hermes-sandbox
 adfs-hermes chat
 ```
 
+## Firm CLI Lane
+
+The default ADFS Hermes local runtime is wired to expose the trusted firm CLIs
+inside the Docker container through mounted repos and sandbox wrapper scripts.
+
+Container mounts:
+
+- `/opt/adfs-qbo-mcp`
+- `/opt/adfs-firm`
+- `/root/.config/adfs`
+
+Wrapper commands inside the container:
+
+- `/pilot/bin/qbo`
+- `/pilot/bin/adfs-firm`
+- `/pilot/bin/adfs-tools-info`
+
+Examples from inside Hermes terminal use:
+
+```bash
+/pilot/bin/qbo companies
+/pilot/bin/adfs-firm health
+/pilot/bin/adfs-firm client find --query "ACME"
+```
+
 ## Notes
 
 - `adfs-hermes` uses `HERMES_HOME=~/.adfs-hermes`
