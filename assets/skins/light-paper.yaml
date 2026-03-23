@@ -1,0 +1,26 @@
+name: light-paper
+description: Light theme tuned for white terminal backgrounds
+colors:
+  banner_border: "#B7791F"
+  banner_title: "#8C4A00"
+  banner_accent: "#9F5F17"
+  banner_dim: "#6B7280"
+  banner_text: "#1F2937"
+  ui_accent: "#9F5F17"
+  ui_label: "#0F766E"
+  ui_ok: "#166534"
+  ui_error: "#B91C1C"
+  ui_warn: "#B45309"
+  prompt: "#111827"
+  input_rule: "#C2410C"
+  response_border: "#9F5F17"
+  session_label: "#8C4A00"
+  session_border: "#9CA3AF"
+branding:
+  agent_name: "Hermes Agent"
+  welcome: "Welcome to Hermes Agent! Type your message or /help for commands."
+  goodbye: "Goodbye! ⚕"
+  response_label: " Hermes "
+  prompt_symbol: "> "
+  help_header: "[?] Available Commands"
+tool_prefix: "│"
