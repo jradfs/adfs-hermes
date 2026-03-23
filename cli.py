@@ -49,6 +49,7 @@ from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.widgets import TextArea
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.shortcuts import radiolist_dialog
 from prompt_toolkit import print_formatted_text as _pt_print
 from prompt_toolkit.formatted_text import ANSI as _PT_ANSI
 try:
@@ -2730,6 +2731,37 @@ class HermesCLI:
         lines.append("[dim]Use /resume <session_id> to switch to one of these sessions.[/]")
         ChatConsole().print("\n".join(lines))
 
+    def _pick_resume_candidate(self, sessions: list[dict[str, Any]], title: str, text: str) -> Optional[str]:
+        """Prompt-toolkit picker for selecting a past session with the keyboard."""
+        if not sessions:
+            return None
+
+        values: list[tuple[str, str]] = []
+        for session in sessions:
+            sid = session.get("id", "")
+            title_text = (session.get("title") or "Untitled").strip()
+            preview = (session.get("preview") or "").strip()
+            if not preview:
+                preview = _strip_ansi_text(session.get("snippet") or "")
+                preview = preview.replace(">>>", "").replace("<<<", "").strip()
+            preview = preview[:90] + ("..." if len(preview) > 90 else "") if preview else ""
+            last_label = _relative_time(session.get("last_active"))
+            label = f"{title_text} [{sid}] ({last_label})"
+            if preview:
+                label += f" — {preview}"
+            values.append((sid, label))
+
+        try:
+            return radiolist_dialog(
+                title=title,
+                text=text,
+                values=values,
+                ok_text="Resume",
+                cancel_text="Cancel",
+            ).run()
+        except Exception:
+            return None
+
     def _resume_session_in_chat(self, target: str) -> bool:
         """Switch the active CLI chat to a previous session by ID or title."""
         if not self._session_db:
@@ -2738,16 +2770,41 @@ class HermesCLI:
 
         query = (target or "").strip()
         if not query:
-            self._list_resume_candidates()
-            return True
+            try:
+                sessions = self._session_db.list_sessions_rich(source="cli", limit=20)
+            except Exception:
+                sessions = []
+            sessions = [s for s in sessions if s.get("id") != self.session_id]
+            selected_id = self._pick_resume_candidate(
+                sessions,
+                title="Resume Session",
+                text="Use arrow keys to choose a past CLI session",
+            )
+            if selected_id:
+                query = selected_id
+            else:
+                self._list_resume_candidates()
+                return True
 
         resolved_id = self._session_db.resolve_session_id(query)
         if not resolved_id:
             resolved_id = self._session_db.resolve_session_by_title(query)
         if not resolved_id:
             matches = self._search_resume_candidates(query)
-            self._show_resume_search_results(query, matches)
-            return True
+            if matches:
+                selected_id = self._pick_resume_candidate(
+                    matches,
+                    title="Search Past Sessions",
+                    text=f"Use arrow keys to pick a session for: {query}",
+                )
+                if selected_id:
+                    resolved_id = selected_id
+                else:
+                    self._show_resume_search_results(query, matches)
+                    return True
+            else:
+                self._show_resume_search_results(query, matches)
+                return True
 
         if resolved_id == self.session_id:
             ChatConsole().print(
