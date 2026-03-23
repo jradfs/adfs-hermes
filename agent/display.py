@@ -7,6 +7,7 @@ Used by AIAgent._execute_tool_calls for CLI feedback.
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -92,6 +93,46 @@ def get_tool_emoji(tool_name: str, default: str = "⚡") -> str:
 def _oneline(text: str) -> str:
     """Collapse whitespace (including newlines) to single spaces."""
     return " ".join(text.split())
+
+
+def _normalize_terminal_command(command: str) -> str:
+    """Compact shell noise for CLI display without changing meaning."""
+    text = _oneline(command or "")
+    if not text:
+        return text
+
+    text = re.sub(r"\s+2>&1\b", "", text)
+    text = re.sub(r"\s+1>\S+", "", text)
+    text = re.sub(r"\s+2>\S+", "", text)
+    text = text.replace("/pilot/bin/qbo", "qbo")
+    text = text.replace("/pilot/bin/adfs-firm", "adfs-firm")
+    text = text.replace("/pilot/bin/adfs-tools-info", "adfs-tools-info")
+    text = re.sub(r"--company\\s+\"([^\"]{1,18})[^\"]*\"", r'--company "\1..."', text)
+    text = re.sub(r"--company\\s+([A-Za-z0-9_-]{10,})", lambda m: f"--company {m.group(1)[:8]}...", text)
+    text = re.sub(r"--realm-id\\s+([0-9]{6})[0-9]+", r"--realm-id \1...", text)
+    return text.strip()
+
+
+def _terminal_command_preview(command: str, max_len: int = 34) -> str:
+    """Produce a denser preview for terminal commands in quiet-mode logs."""
+    text = _normalize_terminal_command(command)
+    if not text:
+        return ""
+
+    known_prefixes = (
+        "qbo ",
+        "adfs-firm ",
+        "adfs-tools-info",
+        "ls ",
+        "cat ",
+        "find ",
+        "curl ",
+        "git ",
+    )
+    if text.startswith(known_prefixes):
+        return (text[:max_len - 3] + "...") if len(text) > max_len else text
+
+    return (text[:max_len - 3] + "...") if len(text) > max_len else text
 
 
 def build_tool_preview(tool_name: str, args: dict, max_len: int = 40) -> str | None:
@@ -477,7 +518,8 @@ def get_cute_tool_message(
         domain = url.replace("https://", "").replace("http://", "").split("/")[0]
         return _wrap(f"┊ 🕸️  crawl     {_trunc(domain, 35)}  {dur}")
     if tool_name == "terminal":
-        return _wrap(f"┊ 💻 $         {_trunc(args.get('command', ''), 42)}  {dur}")
+        preview = _terminal_command_preview(args.get("command", ""), 34)
+        return _wrap(f"┊ 💻 shell     {preview}  {dur}")
     if tool_name == "process":
         action = args.get("action", "?")
         sid = args.get("session_id", "")[:12]
