@@ -919,6 +919,37 @@ def _response_contains_markdown_table(text: str) -> bool:
     return False
 
 
+def _apply_stream_markdown(line: str, base_ansi: str = "") -> str:
+    """Apply lightweight markdown styling to streamed plain-text lines."""
+    if not line:
+        return line
+
+    def _restore_base() -> str:
+        return f"{_RST}{base_ansi}" if base_ansi else _RST
+
+    def _bold_sub(match: re.Match) -> str:
+        inner = match.group(1)
+        if not inner.strip():
+            return match.group(0)
+        return f"{_BOLD}{inner}{_restore_base()}"
+
+    # Inline bold: **text**
+    styled = re.sub(r"\*\*([^*\n][^*\n]*?)\*\*", _bold_sub, line)
+
+    # Make top-level bullets a touch clearer in the stream.
+    if styled.startswith("- "):
+        styled = f"{_BOLD}•{_restore_base()} {styled[2:]}"
+
+    # Mild section emphasis for lines that are effectively standalone headings.
+    plain = _strip_ansi_text(line).strip()
+    if plain.startswith("**") and plain.endswith("**") and plain.count("**") == 2:
+        heading = plain[2:-2].strip()
+        if heading:
+            styled = f"{_BOLD}{heading}{_restore_base()}"
+
+    return styled
+
+
 def _response_renderable(text: str):
     """Render assistant output with markdown and rich tables when possible."""
     cleaned = _strip_ansi_text(text).replace("\r\n", "\n").replace("\r", "\n")
@@ -1866,7 +1897,8 @@ class HermesCLI:
         """Emit a single non-table line inside the active response box."""
         self._ensure_stream_box_open()
         _tc = getattr(self, "_stream_text_ansi", "")
-        _cprint(f"{_tc}{line}{_RST}" if _tc else line)
+        styled_line = _apply_stream_markdown(line, _tc)
+        _cprint(f"{_tc}{styled_line}{_RST}" if _tc else styled_line)
 
     def _render_inline_stream_table(self, lines: list[str]) -> bool:
         """Render a completed markdown table block inline during streaming."""

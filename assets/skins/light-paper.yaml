@@ -15,8 +15,8 @@ colors:
   ui_error: "#B91C1C"
   ui_warn: "#A15C07"
   prompt: "#101828"
-  input_rule: "#B86A1B"
-  response_border: "#8B5A14"
+  input_rule: "#A15C07"
+  response_border: "#7C3F00"
   session_label: "#7C3F00"
   session_border: "#9CA3AF"
 branding:
