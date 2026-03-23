@@ -689,6 +689,9 @@ def get_prompt_toolkit_style_overrides() -> Dict[str, str]:
     label = skin.get_color("ui_label", title)
     warn = skin.get_color("ui_warn", "#FF8C00")
     error = skin.get_color("ui_error", "#FF6B6B")
+    panel_bg = skin.get_color("panel_bg", "#1a1a2e")
+    panel_bg_alt = skin.get_color("panel_bg_alt", panel_bg)
+    panel_bg_active = skin.get_color("panel_bg_active", "#333355")
 
     return {
         "input-area": prompt,
@@ -696,13 +699,20 @@ def get_prompt_toolkit_style_overrides() -> Dict[str, str]:
         "prompt": prompt,
         "prompt-working": f"{dim} italic",
         "hint": f"{dim} italic",
+        "status-bar": f"bg:{panel_bg} {text}",
+        "status-bar-strong": f"bg:{panel_bg} {title} bold",
+        "status-bar-dim": f"bg:{panel_bg} {dim}",
+        "status-bar-good": f"bg:{panel_bg} {skin.get_color('ui_ok', '#8FBC8F')} bold",
+        "status-bar-warn": f"bg:{panel_bg} {warn} bold",
+        "status-bar-bad": f"bg:{panel_bg} {warn} bold",
+        "status-bar-critical": f"bg:{panel_bg} {error} bold",
         "input-rule": input_rule,
         "image-badge": f"{label} bold",
-        "completion-menu": f"bg:#1a1a2e {text}",
-        "completion-menu.completion": f"bg:#1a1a2e {text}",
-        "completion-menu.completion.current": f"bg:#333355 {title}",
-        "completion-menu.meta.completion": f"bg:#1a1a2e {dim}",
-        "completion-menu.meta.completion.current": f"bg:#333355 {label}",
+        "completion-menu": f"bg:{panel_bg} {text}",
+        "completion-menu.completion": f"bg:{panel_bg} {text}",
+        "completion-menu.completion.current": f"bg:{panel_bg_active} {title}",
+        "completion-menu.meta.completion": f"bg:{panel_bg_alt} {dim}",
+        "completion-menu.meta.completion.current": f"bg:{panel_bg_active} {label}",
         "clarify-border": input_rule,
         "clarify-title": f"{title} bold",
         "clarify-question": f"{text} bold",
@@ -720,4 +730,6 @@ def get_prompt_toolkit_style_overrides() -> Dict[str, str]:
         "approval-cmd": f"{dim} italic",
         "approval-choice": dim,
         "approval-selected": f"{title} bold",
+        "voice-status": f"bg:{panel_bg} {label}",
+        "voice-status-recording": f"bg:{panel_bg} {error} bold",
     }
